@@ -1,0 +1,330 @@
+package com.vincenthzr.locationspoofer.ui.components.map
+
+import android.content.Context
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
+import com.baidu.mapapi.map.BaiduMap
+import com.baidu.mapapi.map.Stroke
+import com.baidu.mapapi.map.TextureMapView
+import com.baidu.mapapi.model.LatLng
+import com.vincenthzr.locationspoofer.data.model.AppMapType
+import com.vincenthzr.locationspoofer.ui.components.AppMapController
+import com.vincenthzr.locationspoofer.ui.components.AppMapMarker
+import com.vincenthzr.locationspoofer.ui.components.MarkerType
+
+class BaiduMapControllerImpl(
+    private val map: BaiduMap,
+    private val mapView: TextureMapView,
+    private val context: Context
+) : AppMapController {
+    private var isDarkMode: Boolean = false
+    private var currentMapType: AppMapType = AppMapType.NORMAL
+
+    override fun setDarkMode(isDark: Boolean, context: Context) {
+        isDarkMode = isDark
+        val customStyleOptions = com.baidu.mapapi.map.MapCustomStyleOptions()
+        if (isDark) {
+            customStyleOptions.customStyleId("ed7541b0077ffda0205ff36f2a5633b1")
+            mapView.setMapCustomStyle(
+                customStyleOptions,
+                object : com.baidu.mapapi.map.CustomMapStyleCallBack {
+                    override fun onPreLoadLastCustomMapStyle(p0: String?): Boolean = false
+                    override fun onCustomMapStyleLoadSuccess(p0: Boolean, p1: String?): Boolean =
+                        true
+
+                    override fun onCustomMapStyleLoadFailed(
+                        p0: Int,
+                        p1: String?,
+                        p2: String?
+                    ): Boolean = false
+                })
+            mapView.setMapCustomStyleEnable(true)
+        } else {
+            mapView.setMapCustomStyleEnable(false)
+        }
+        setMapType(currentMapType)
+    }
+
+    override fun clear() {
+        map.clear()
+    }
+
+    override fun addPolyline(points: List<Pair<Double, Double>>, colorInt: Int, width: Float) {
+        if (points.size < 2) return
+        // 项目内统一存 GCJ-02，百度地图渲染前转成 BD-09
+        val latLngList = points.map {
+            val bd = gcj02ToBd09(it.first, it.second)
+            LatLng(bd.first, bd.second)
+        }
+        map.addOverlay(
+            com.baidu.mapapi.map.PolylineOptions()
+                .color(colorInt)
+                .width(width.toInt())
+                .points(latLngList)
+        )
+    }
+
+    override fun addCircle(
+        lat: Double,
+        lng: Double,
+        radius: Double,
+        fillColorInt: Int,
+        strokeColorInt: Int,
+        strokeWidth: Float
+    ) {
+        val bd = gcj02ToBd09(lat, lng)
+        map.addOverlay(
+            com.baidu.mapapi.map.CircleOptions()
+                .center(LatLng(bd.first, bd.second))
+                .radius(radius.toInt())
+                .fillColor(fillColorInt)
+                .stroke(Stroke(strokeWidth.toInt(), strokeColorInt))
+        )
+    }
+
+    override fun addMarker(
+        lat: Double,
+        lng: Double,
+        title: String,
+        type: MarkerType
+    ): AppMapMarker {
+        val bitmap = GaodeMarkerHelper.getMarkerBitmap(context, title, type)
+        val descriptor = com.baidu.mapapi.map.BitmapDescriptorFactory.fromBitmap(bitmap)
+        val bd = gcj02ToBd09(lat, lng)
+        val marker = map.addOverlay(
+            com.baidu.mapapi.map.MarkerOptions()
+                .position(LatLng(bd.first, bd.second))
+                .title(title)
+                .icon(descriptor)
+                .anchor(0.5f, 0.9f)
+        ) as? com.baidu.mapapi.map.Marker
+        return object : AppMapMarker {
+            override fun setPosition(lat: Double, lng: Double) {
+                val position = gcj02ToBd09(lat, lng)
+                marker?.position = LatLng(position.first, position.second)
+            }
+        }
+    }
+
+    override fun animateCamera(lat: Double, lng: Double, zoom: Float?) {
+        val bd = gcj02ToBd09(lat, lng)
+        val update = if (zoom != null) com.baidu.mapapi.map.MapStatusUpdateFactory.newLatLngZoom(
+            LatLng(bd.first, bd.second), zoom
+        )
+        else com.baidu.mapapi.map.MapStatusUpdateFactory.newLatLng(
+            LatLng(bd.first, bd.second)
+        )
+        map.animateMapStatus(update)
+    }
+
+    override fun fitBounds(points: List<Pair<Double, Double>>, padding: Int) {
+        fitBounds(points, padding, padding, padding, padding)
+    }
+
+    override fun fitBounds(
+        points: List<Pair<Double, Double>>,
+        paddingLeft: Int,
+        paddingTop: Int,
+        paddingRight: Int,
+        paddingBottom: Int
+    ) {
+        if (points.isEmpty()) return
+        try {
+            val bdPoints = points.map { gcj02ToBd09(it.first, it.second) }
+            var minLat = 90.0
+            var maxLat = -90.0
+            var minLng = 180.0
+            var maxLng = -180.0
+            bdPoints.forEach {
+                if (it.first < minLat) minLat = it.first
+                if (it.first > maxLat) maxLat = it.first
+                if (it.second < minLng) minLng = it.second
+                if (it.second > maxLng) maxLng = it.second
+            }
+            val verticalDiff = maxLat - minLat
+            val centerLat =
+                (minLat + maxLat) / 2 - (if (paddingBottom > paddingTop) verticalDiff * 0.15 else 0.0)
+            val centerLng = (minLng + maxLng) / 2
+
+            val results = FloatArray(1)
+            android.location.Location.distanceBetween(minLat, minLng, maxLat, maxLng, results)
+            val distance = results[0]
+
+            val zoom = when {
+                distance < 80 -> 18.5f
+                distance < 250 -> 17.5f
+                distance < 600 -> 16.5f
+                distance < 1500 -> 15.5f
+                distance < 3500 -> 14.5f
+                distance < 8000 -> 13.5f
+                distance < 18000 -> 12.5f
+                distance < 45000 -> 11.5f
+                distance < 100000 -> 10.5f
+                distance < 250000 -> 9.5f
+                else -> 8.5f
+            }
+
+            val update = com.baidu.mapapi.map.MapStatusUpdateFactory.newLatLngZoom(
+                LatLng(centerLat, centerLng), zoom
+            )
+            map.animateMapStatus(update)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    override fun moveCamera(lat: Double, lng: Double, zoom: Float?) {
+        val bd = gcj02ToBd09(lat, lng)
+        val update = if (zoom != null) com.baidu.mapapi.map.MapStatusUpdateFactory.newLatLngZoom(
+            LatLng(bd.first, bd.second), zoom
+        )
+        else com.baidu.mapapi.map.MapStatusUpdateFactory.newLatLng(
+            LatLng(bd.first, bd.second)
+        )
+        map.setMapStatus(update)
+    }
+
+    // 百度地图 SDK 使用 BD-09；对外统一返回项目内的 GCJ-02
+    override fun screenToLatLng(x: Float, y: Float): Pair<Double, Double>? = runCatching {
+        val point = android.graphics.Point(
+            x.toInt(),
+            y.toInt()
+        )
+        map.projection.fromScreenLocation(point)?.let {
+            bd09ToGcj02(it.latitude, it.longitude)
+        }
+    }.getOrNull()
+
+    override fun zoomBy(delta: Float) {
+        map.animateMapStatus(com.baidu.mapapi.map.MapStatusUpdateFactory.zoomBy(delta))
+    }
+
+    override fun setGesturesEnabled(enabled: Boolean) {
+        map.uiSettings.isScrollGesturesEnabled = enabled
+        map.uiSettings.isZoomGesturesEnabled = enabled
+        map.uiSettings.isRotateGesturesEnabled = enabled
+        map.uiSettings.isOverlookingGesturesEnabled = enabled
+    }
+
+    override val cameraTargetLat: Double?
+        get() = map.mapStatus?.target?.let { bd09ToGcj02(it.latitude, it.longitude).first }
+    override val cameraTargetLng: Double?
+        get() = map.mapStatus?.target?.let { bd09ToGcj02(it.latitude, it.longitude).second }
+
+    private var cameraFinishListener: ((Double, Double) -> Unit)? = null
+    private var cameraMoveListener: ((Double, Double) -> Unit)? = null
+
+    init {
+        map.setOnMapStatusChangeListener(object :
+            BaiduMap.OnMapStatusChangeListener {
+            private var lastReason: Int = 0
+            override fun onMapStatusChangeStart(p0: com.baidu.mapapi.map.MapStatus?) {}
+            override fun onMapStatusChangeStart(p0: com.baidu.mapapi.map.MapStatus?, p1: Int) {
+                lastReason = p1
+            }
+
+            override fun onMapStatusChange(p0: com.baidu.mapapi.map.MapStatus?) {
+                if (lastReason == BaiduMap.OnMapStatusChangeListener.REASON_GESTURE) {
+                    p0?.target?.let {
+                        val gcj = bd09ToGcj02(it.latitude, it.longitude)
+                        cameraMoveListener?.invoke(gcj.first, gcj.second)
+                    }
+                }
+            }
+
+            override fun onMapStatusChangeFinish(p0: com.baidu.mapapi.map.MapStatus?) {
+                if (lastReason == BaiduMap.OnMapStatusChangeListener.REASON_GESTURE) {
+                    p0?.target?.let {
+                        val gcj = bd09ToGcj02(it.latitude, it.longitude)
+                        cameraFinishListener?.invoke(gcj.first, gcj.second)
+                    }
+                }
+            }
+        })
+    }
+
+    override fun setOnCameraChangeListener(onFinish: (lat: Double, lng: Double) -> Unit) {
+        cameraFinishListener = onFinish
+    }
+
+    override fun setOnCameraMoveListener(onMove: (lat: Double, lng: Double) -> Unit) {
+        cameraMoveListener = onMove
+    }
+
+    override fun disableUiControls() {
+        map.uiSettings.isZoomGesturesEnabled = true
+        map.uiSettings.isScrollGesturesEnabled = true
+        map.uiSettings.isOverlookingGesturesEnabled = true
+        map.uiSettings.isRotateGesturesEnabled = true
+    }
+
+    override fun setMapType(type: AppMapType) {
+        currentMapType = type
+        when (type) {
+            AppMapType.NORMAL -> {
+                map.mapType = BaiduMap.MAP_TYPE_NORMAL
+            }
+
+            AppMapType.SATELLITE -> {
+                map.mapType = BaiduMap.MAP_TYPE_SATELLITE
+            }
+
+            AppMapType.MAP_3D -> {
+                map.mapType = BaiduMap.MAP_TYPE_NORMAL
+            }
+        }
+    }
+}
+
+@Composable
+fun BaiduMapViewContainer(
+    context: Context,
+    lifecycleOwner: LifecycleOwner,
+    isDark: Boolean,
+    modifier: Modifier,
+    onMapReady: (AppMapController) -> Unit,
+    onControllerCreated: (AppMapController) -> Unit
+) {
+    val baiduMapView = remember {
+        TextureMapView(context)
+    }
+
+    DisposableEffect(lifecycleOwner.lifecycle, baiduMapView) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> baiduMapView.onResume()
+                Lifecycle.Event.ON_PAUSE -> baiduMapView.onPause()
+                Lifecycle.Event.ON_DESTROY -> baiduMapView.onDestroy()
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            baiduMapView.onResume()
+        }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            baiduMapView.onPause()
+            baiduMapView.onDestroy()
+        }
+    }
+
+    AndroidView(
+        factory = {
+            baiduMapView.apply {
+                setOnTouchListener { v, _ -> v.parent?.requestDisallowInterceptTouchEvent(true); false }
+                map.setOnMapLoadedCallback {
+                    val controller = BaiduMapControllerImpl(map, this, context)
+                    onControllerCreated(controller)
+                    controller.setDarkMode(isDark, context)
+                    onMapReady(controller)
+                }
+            }
+        },
+        modifier = modifier
+    )
+}
